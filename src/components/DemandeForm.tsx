@@ -1,11 +1,16 @@
 import React, { useState } from 'react';
 import { 
-  FileText, Upload, CheckCircle2, AlertCircle, Copy, Check, Download, 
-  ArrowRight, ArrowLeft, Shield, Paperclip, X, Eye, Clock, User
+  FileText, Upload, CheckCircle2, AlertCircle, AlertTriangle, Copy, Check, Download, 
+  ArrowRight, ArrowLeft, Shield, Paperclip, X, Eye, Clock, User, RefreshCw
 } from 'lucide-react';
 import { translations } from '../types.ts';
-import { createDemande, generateNumeroSuivi, DemandeModel } from '../services/demandesService.ts';
-import { validatePieceJustificative, uploadPieceJustificative, UploadedFileMeta } from '../services/storageService.ts';
+import { createDemande, generateNumeroSuivi, updateDemande, DemandeModel } from '../services/demandesService.ts';
+import { 
+  validatePieceJustificative, 
+  uploadPieceJustificativeResumable, 
+  compressImage, 
+  UploadedFileMeta 
+} from '../services/storageService.ts';
 import { generateReceiptPdf } from '../services/pdfService.ts';
 
 interface DemandeFormProps {
@@ -46,6 +51,16 @@ export default function DemandeForm({ lang, initialDocType, onGoToTrack, onCance
   const [errorMessage, setErrorMessage] = useState<string>('');
   const [completedDemande, setCompletedDemande] = useState<DemandeModel | null>(null);
   const [copiedSuccess, setCopiedSuccess] = useState<boolean>(false);
+
+  // File Upload Progress State
+  const [uploadProgress, setUploadProgress] = useState<{
+    currentFileName: string;
+    percent: number;
+    currentIndex: number;
+    totalCount: number;
+  } | null>(null);
+  const [uploadStatus, setUploadStatus] = useState<'idle' | 'uploading' | 'success' | 'error'>('idle');
+  const [uploadWarning, setUploadWarning] = useState<string>('');
 
   // Validate Act number format e.g. "234/78" or "12/2020"
   const validateActNumber = (num: string) => {
@@ -95,6 +110,9 @@ export default function DemandeForm({ lang, initialDocType, onGoToTrack, onCance
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
+    setUploadWarning('');
+    setUploadProgress(null);
+    setUploadStatus('idle');
 
     // Field Validations
     if (!cin.trim() || !nomComplet.trim() || !dateNaissance || !lieuNaissance.trim()) {
@@ -130,92 +148,192 @@ export default function DemandeForm({ lang, initialDocType, onGoToTrack, onCance
     }
 
     setIsSubmitting(true);
+    setUploadStepMsg(
+      lang === 'ar' 
+        ? 'جاري تسجيل الطلب وتوليد رقم التتبع...' 
+        : 'Enregistrement de la demande dans la base de données...'
+    );
+
     const numeroSuivi = generateNumeroSuivi();
+    const totalFiles = (cinRectoFile ? 1 : 0) + (cinVersoFile ? 1 : 0) + complementaryFiles.length;
+
+    // 1. ORDRE : Enregistrement D'ABORD dans Firestore (collection "demandes", ID = numeroSuivi)
+    // avec les champs texte et statut "Nouvelle", SANS attendre les fichiers.
+    // Elle apparaît ainsi immédiatement dans EmployeeDashboard via onSnapshot.
+    const initialDemandeData: DemandeModel = {
+      id: numeroSuivi,
+      numeroSuivi,
+      cin: cin.trim().toUpperCase(),
+      nomComplet: nomComplet.trim(),
+      dateNaissance,
+      lieuNaissance: lieuNaissance.trim(),
+      communeEnregistrement: communeEnregistrement.trim(),
+      anneeEnregistrement: anneeEnregistrement.trim(),
+      numeroActe: numeroActe.trim(),
+      telephone: telephone.trim(),
+      email: email.trim() || undefined,
+      adresse: adresse.trim(),
+      typeDocument: docType,
+      nombreCopies: Number(numberOfCopies) || 1,
+      statut: 'Nouvelle',
+      piecesStatut: totalFiles > 0 ? 'en_cours' : 'aucune',
+      cinRectoUrl: '',
+      cinVersoUrl: '',
+      piecesJointes: [],
+      notesInternes: '',
+      notesCitoyen: '',
+      dateRetrait: '',
+      createdAt: new Date().toISOString(),
+    };
 
     try {
-      const uploadedAttachments: UploadedFileMeta[] = [];
-      let cinRectoUrl = '';
-      let cinVersoUrl = '';
+      await createDemande(initialDemandeData);
+      
+      // 4. Écran de confirmation : affiché dès que le document Firestore est créé
+      setCompletedDemande(initialDemandeData);
+    } catch (firestoreErr: any) {
+      console.error('Erreur enregistrement Firestore initial:', firestoreErr?.code || firestoreErr?.message, firestoreErr);
+      setErrorMessage(
+        firestoreErr?.message || 
+        (lang === 'ar' 
+          ? 'تعذر تسجيل الطلب في قاعدة البيانات. يرجى التحقق من الاتصال والمحاولة مجدداً.' 
+          : 'Impossible d\'enregistrer la demande dans la base de données. Veuillez réessayer.')
+      );
+      setIsSubmitting(false);
+      setUploadStepMsg('');
+      return;
+    } finally {
+      setIsSubmitting(false);
+      setUploadStepMsg('');
+    }
 
-      // Upload CIN Recto if provided
+    // Si aucune pièce justificative n'est sélectionnée, arrêter ici
+    if (totalFiles === 0) {
+      setUploadStatus('success');
+      return;
+    }
+
+    // 2. FICHIERS : ensuite, téléverse les pièces avec uploadBytesResumable, une par une,
+    // avec barre de progression (%) pour chaque fichier, puis mets à jour le document (updateDoc)
+    setUploadStatus('uploading');
+    const uploadedAttachments: UploadedFileMeta[] = [];
+    let cinRectoUrl = '';
+    let cinVersoUrl = '';
+    let fileIndex = 0;
+
+    try {
+      // Upload CIN Recto
       if (cinRectoFile) {
-        setUploadStepMsg(
-          lang === 'ar' 
-            ? 'جاري رفع صورة الوجه الأمامي للبطاقة الوطنية...' 
-            : 'Téléversement du recto de la CIN...'
+        fileIndex++;
+        setUploadProgress({
+          currentFileName: lang === 'ar' ? 'صورة الوجه الأمامي للبطاقة الوطنية (CIN Recto)' : 'CIN Recto',
+          percent: 0,
+          currentIndex: fileIndex,
+          totalCount: totalFiles,
+        });
+
+        // 5. Compresse côté client les images (JPG/PNG) avant envoi (max 1600 px, qualité 0.8)
+        const compressedRecto = await compressImage(cinRectoFile);
+        const metaRecto = await uploadPieceJustificativeResumable(
+          numeroSuivi,
+          compressedRecto,
+          'cin_recto',
+          (pct) => setUploadProgress((prev) => prev ? { ...prev, percent: pct } : null),
+          30000 // Timeout strict de 30 secondes
         );
-        const meta = await uploadPieceJustificative(numeroSuivi, cinRectoFile, 'cin_recto');
-        uploadedAttachments.push(meta);
-        cinRectoUrl = meta.url;
+        uploadedAttachments.push(metaRecto);
+        cinRectoUrl = metaRecto.url;
       }
 
-      // Upload CIN Verso if provided
+      // Upload CIN Verso
       if (cinVersoFile) {
-        setUploadStepMsg(
-          lang === 'ar' 
-            ? 'جاري رفع صورة الوجه الخلفي للبطاقة الوطنية...' 
-            : 'Téléversement du verso de la CIN...'
+        fileIndex++;
+        setUploadProgress({
+          currentFileName: lang === 'ar' ? 'صورة الوجه الخلفي للبطاقة الوطنية (CIN Verso)' : 'CIN Verso',
+          percent: 0,
+          currentIndex: fileIndex,
+          totalCount: totalFiles,
+        });
+
+        const compressedVerso = await compressImage(cinVersoFile);
+        const metaVerso = await uploadPieceJustificativeResumable(
+          numeroSuivi,
+          compressedVerso,
+          'cin_verso',
+          (pct) => setUploadProgress((prev) => prev ? { ...prev, percent: pct } : null),
+          30000
         );
-        const meta = await uploadPieceJustificative(numeroSuivi, cinVersoFile, 'cin_verso');
-        uploadedAttachments.push(meta);
-        cinVersoUrl = meta.url;
+        uploadedAttachments.push(metaVerso);
+        cinVersoUrl = metaVerso.url;
       }
 
       // Upload Complementary files
       for (let i = 0; i < complementaryFiles.length; i++) {
-        const file = complementaryFiles[i];
-        setUploadStepMsg(
-          lang === 'ar' 
-            ? `جاري رفع الوثيقة المرفقة (${i + 1}/${complementaryFiles.length})...` 
-            : `Téléversement du document complémentaire (${i + 1}/${complementaryFiles.length})...`
+        const compFile = complementaryFiles[i];
+        fileIndex++;
+        setUploadProgress({
+          currentFileName: compFile.name,
+          percent: 0,
+          currentIndex: fileIndex,
+          totalCount: totalFiles,
+        });
+
+        const compressedComp = await compressImage(compFile);
+        const metaComp = await uploadPieceJustificativeResumable(
+          numeroSuivi,
+          compressedComp,
+          'complementaire',
+          (pct) => setUploadProgress((prev) => prev ? { ...prev, percent: pct } : null),
+          30000
         );
-        const meta = await uploadPieceJustificative(numeroSuivi, file, 'complementaire');
-        uploadedAttachments.push(meta);
+        uploadedAttachments.push(metaComp);
       }
 
-      // Enregistrement dans Firestore (collection "demandes")
-      setUploadStepMsg(
-        lang === 'ar' ? 'جاري تسجيل الطلب وتوليد وصل الإيداع...' : 'Enregistrement de la demande dans la base de données...'
-      );
+      // Mise à jour finale du document dans Firestore avec les URLs et pièces
+      try {
+        await updateDemande(numeroSuivi, {
+          cinRectoUrl,
+          cinVersoUrl,
+          piecesJointes: uploadedAttachments,
+          piecesStatut: 'succes',
+        });
+      } catch (updateErr: any) {
+        console.error('Erreur technique updateDoc pieces:', updateErr?.code || updateErr?.message, updateErr);
+      }
 
-      const demandeData: DemandeModel = {
-        id: numeroSuivi,
-        numeroSuivi,
-        cin: cin.trim().toUpperCase(),
-        nomComplet: nomComplet.trim(),
-        dateNaissance,
-        lieuNaissance: lieuNaissance.trim(),
-        communeEnregistrement: communeEnregistrement.trim(),
-        anneeEnregistrement: anneeEnregistrement.trim(),
-        numeroActe: numeroActe.trim(),
-        telephone: telephone.trim(),
-        email: email.trim() || undefined,
-        adresse: adresse.trim(),
-        typeDocument: docType,
-        nombreCopies: Number(numberOfCopies) || 1,
-        statut: 'Nouvelle',
-        cinRectoUrl,
-        cinVersoUrl,
-        piecesJointes: uploadedAttachments,
-        notesInternes: '',
-        notesCitoyen: '',
-        dateRetrait: '',
-        createdAt: new Date().toISOString(),
-      };
-
-      await createDemande(demandeData);
-      setCompletedDemande(demandeData);
-    } catch (err: any) {
-      console.error('Erreur soumission demande:', err);
-      setErrorMessage(
-        err.message || 
-        (lang === 'ar' 
-          ? 'تعذر إرسال الطلب. يرجى التحقق من الاتصال بالإنترنت والمحاولة مجدداً.' 
-          : 'Impossible d\'envoyer la demande. Veuillez vérifier votre connexion et réessayer.')
+      // Mettre à jour l'objet local dans l'état
+      setCompletedDemande((prev) =>
+        prev
+          ? {
+              ...prev,
+              cinRectoUrl,
+              cinVersoUrl,
+              piecesJointes: uploadedAttachments,
+              piecesStatut: 'succes',
+            }
+          : null
       );
-    } finally {
-      setIsSubmitting(false);
-      setUploadStepMsg('');
+      setUploadStatus('success');
+      setUploadProgress(null);
+
+    } catch (uploadErr: any) {
+      // 3. TIMEOUT / ERREURS : si un upload dépasse 30 secondes ou échoue (Storage indisponible, règles, réseau)
+      console.error('Erreur technique exacte Storage (error.code):', uploadErr?.code || uploadErr?.message || 'storage/unknown', uploadErr);
+
+      // Marquer dans le document piecesStatut: "echec"
+      try {
+        await updateDemande(numeroSuivi, { piecesStatut: 'echec' });
+      } catch (markErr: any) {
+        console.error('Erreur technique updateDoc piecesStatut: echec:', markErr?.code || markErr?.message, markErr);
+      }
+
+      setUploadStatus('error');
+      setUploadProgress(null);
+      setUploadWarning(
+        lang === 'ar'
+          ? 'تم تسجيل الطلب، لكن تعذر رفع الوثائق المرفقة. يرجى الحضور إلى شباك الحالة المدنية مصحوباً بالوثائق الأصلية.'
+          : 'Demande enregistrée, mais l\'envoi des pièces a échoué. Présentez-vous avec vos originaux au guichet.'
+      );
     }
   };
 
@@ -268,6 +386,55 @@ export default function DemandeForm({ lang, initialDocType, onGoToTrack, onCance
             </p>
           )}
         </div>
+
+        {/* File Upload Progress Widget during active upload */}
+        {uploadStatus === 'uploading' && uploadProgress && (
+          <div className="mt-6 p-4 bg-slate-50 dark:bg-slate-800/60 border border-slate-200 dark:border-slate-700 rounded-2xl max-w-md mx-auto text-start">
+            <div className="flex items-center justify-between text-xs font-semibold text-slate-700 dark:text-slate-200 mb-1.5">
+              <span className="flex items-center gap-2 truncate">
+                <RefreshCw className="w-3.5 h-3.5 text-[#005BAC] animate-spin shrink-0" />
+                <span className="truncate">{uploadProgress.currentFileName}</span>
+              </span>
+              <span className="shrink-0 font-mono text-[#005BAC] dark:text-blue-400 font-bold">
+                {uploadProgress.percent}% ({uploadProgress.currentIndex}/{uploadProgress.totalCount})
+              </span>
+            </div>
+            <div className="w-full bg-slate-200 dark:bg-slate-700 h-2.5 rounded-full overflow-hidden">
+              <div 
+                className="bg-[#005BAC] h-full transition-all duration-300 rounded-full"
+                style={{ width: `${uploadProgress.percent}%` }}
+              />
+            </div>
+            <p className="text-[11px] text-slate-400 mt-1.5 text-center">
+              {lang === 'ar' ? 'جاري رفع الوثائق المرفقة إلى السيرفر...' : 'Téléversement des pièces justificatives...'}
+            </p>
+          </div>
+        )}
+
+        {/* File Upload Warning / Error Widget */}
+        {(uploadStatus === 'error' || uploadWarning) && (
+          <div className="mt-6 p-4 bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 rounded-2xl max-w-lg mx-auto text-amber-800 dark:text-amber-200 flex items-start gap-3 text-start">
+            <AlertTriangle className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+            <div className="text-xs sm:text-sm font-medium leading-relaxed">
+              <p className="font-bold mb-0.5 text-amber-900 dark:text-amber-100">
+                {lang === 'ar' ? 'تنبيه بخصوص الوثائق المرفقة :' : 'Information concernant vos pièces :'}
+              </p>
+              <p>{uploadWarning}</p>
+            </div>
+          </div>
+        )}
+
+        {/* File Upload Success Badge */}
+        {uploadStatus === 'success' && (cinRectoFile || cinVersoFile || complementaryFiles.length > 0) && (
+          <div className="mt-4 inline-flex items-center gap-2 px-4 py-2 bg-emerald-50 dark:bg-emerald-950/30 border border-emerald-200 dark:border-emerald-800 rounded-xl text-xs font-semibold text-emerald-700 dark:text-emerald-300">
+            <Check className="w-4 h-4 text-emerald-600" />
+            <span>
+              {lang === 'ar' 
+                ? 'تم رفع جميع الوثائق المرفقة بنجاح' 
+                : 'Toutes les pièces justificatives ont été téléversées avec succès.'}
+            </span>
+          </div>
+        )}
 
         {/* Download Receipt and Track Actions */}
         <div className="mt-8 flex flex-col sm:flex-row gap-4 justify-center items-center">

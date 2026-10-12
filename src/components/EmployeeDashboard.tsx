@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import * as XLSX from 'xlsx';
 import { translations } from '../types.ts';
 import { 
-  FileText, Search, CheckCircle, XCircle, AlertCircle, Eye, Printer, 
+  FileText, Search, CheckCircle, XCircle, AlertCircle, AlertTriangle, Eye, Printer, 
   Calendar, Download, RefreshCw, Filter, Layers, Clock, ShieldCheck, 
   User, MapPin, Phone, Mail, FileDown, Check, ExternalLink, X, Paperclip, ChevronRight
 } from 'lucide-react';
@@ -423,10 +423,18 @@ export default function EmployeeDashboard({ lang, user }: EmployeeDashboardProps
                         {formatDemandeDate(item.createdAt, lang)}
                       </td>
                       <td className="py-3 px-4">
-                        <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold border ${badge.bg}`}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${badge.dot}`} />
-                          <span>{lang === 'ar' ? badge.labelAr : badge.labelFr}</span>
-                        </span>
+                        <div className="flex flex-col items-start gap-1">
+                          <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-xs font-bold border ${badge.bg}`}>
+                            <span className={`w-1.5 h-1.5 rounded-full ${badge.dot}`} />
+                            <span>{lang === 'ar' ? badge.labelAr : badge.labelFr}</span>
+                          </span>
+                          {(item.piecesStatut === 'echec' || (!item.cinRectoUrl && (!item.piecesJointes || item.piecesJointes.length === 0))) && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-amber-50 dark:bg-amber-950/40 text-amber-700 dark:text-amber-300 border border-amber-200 dark:border-amber-900/60">
+                              <AlertTriangle className="w-3 h-3 text-amber-500 shrink-0" />
+                              <span>{lang === 'ar' ? 'وثائق ناقصة' : 'Pièces manquantes'}</span>
+                            </span>
+                          )}
+                        </div>
                       </td>
                       <td className="py-3 px-4 text-center">
                         <button
@@ -568,6 +576,22 @@ export default function EmployeeDashboard({ lang, user }: EmployeeDashboardProps
                   <Paperclip className="w-4 h-4 text-[#005BAC]" />
                   <span>{lang === 'ar' ? 'الوثائق والشهادات المرفقة (Firebase Storage)' : 'Pièces justificatives téléversées'}</span>
                 </h3>
+
+                {(selectedDemande.piecesStatut === 'echec' || (!selectedDemande.cinRectoUrl && (!selectedDemande.piecesJointes || selectedDemande.piecesJointes.length === 0))) && (
+                  <div className="mb-4 p-3.5 rounded-xl bg-amber-50 dark:bg-amber-950/40 border border-amber-300 dark:border-amber-800 text-xs text-amber-800 dark:text-amber-200 flex items-start gap-2.5">
+                    <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-bold block mb-0.5">
+                        {lang === 'ar' ? 'وثائق ناقصة أو تعذر رفعها :' : 'Pièces manquantes ou échec de téléversement :'}
+                      </span>
+                      <span>
+                        {lang === 'ar'
+                          ? 'يجب على صاحب الطلب الإدلاء بالوثائق والبطاقة الوطنية الأصلية في شباك الحالة المدنية عند الاستلام.'
+                          : 'Le requérant devra présenter ses pièces justificatives originales au guichet lors du retrait de l\'acte.'}
+                      </span>
+                    </div>
+                  </div>
+                )}
 
                 {(!selectedDemande.piecesJointes || selectedDemande.piecesJointes.length === 0) && !selectedDemande.cinRectoUrl && !selectedDemande.cinVersoUrl ? (
                   <p className="text-slate-400 text-xs italic">

@@ -37,6 +37,7 @@ export interface DemandeModel {
   typeDocument: string;
   nombreCopies: number;
   statut: StatutDemande;
+  piecesStatut?: 'succes' | 'echec' | 'en_cours' | 'aucune';
   cinRectoUrl?: string;
   cinVersoUrl?: string;
   piecesJointes?: UploadedFileMeta[];
@@ -71,6 +72,7 @@ export async function createDemande(input: CreateDemandeInput): Promise<string> 
     id: numeroSuivi,
     numeroSuivi,
     statut: input.statut || 'Nouvelle',
+    piecesStatut: input.piecesStatut || 'aucune',
     nombreCopies: Number(input.nombreCopies) || 1,
     notesInternes: input.notesInternes || '',
     notesCitoyen: input.notesCitoyen || '',

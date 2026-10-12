@@ -291,14 +291,29 @@ export default function SuiviDemande({ lang, initialTrackingNumber, onNewRequest
               </div>
             </div>
 
+            {/* Warning if attachments failed during submission */}
+            {demande.piecesStatut === 'echec' && (
+              <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-300 dark:border-amber-800 text-amber-900 dark:text-amber-200">
+                <div className="flex items-center gap-2 mb-1.5 font-bold text-xs sm:text-sm">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                  <span>{lang === 'ar' ? 'تذكير بالوثائق المرفقة :' : 'Rappel concernant vos pièces justificatives :'}</span>
+                </div>
+                <p className="text-xs sm:text-sm leading-relaxed">
+                  {lang === 'ar'
+                    ? 'تعذر رفع بعض الوثائق عند إيداع الطلب. يرجى الحضور إلى شباك الحالة المدنية مصحوباً بالوثائق والبطاقة الوطنية الأصلية.'
+                    : 'L\'envoi numérique des pièces n\'a pas pu aboutir lors du dépôt. Veuillez vous présenter au guichet communal avec vos originaux physiques.'}
+                </p>
+              </div>
+            )}
+
             {/* Visible Citizen Notes Alert (if any) */}
             {demande.notesCitoyen && (
               <div className="p-4 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-900/50 text-amber-900 dark:text-amber-300">
                 <div className="flex items-center gap-2 mb-1.5 font-bold text-xs sm:text-sm">
-                  <AlertTriangle className="w-4 h-4 text-amber-600" />
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
                   <span>{lang === 'ar' ? 'ملاحظات وتوجيهات الإدارة :' : 'Instructions de l\'administration :'}</span>
                 </div>
-                <p className="text-xs sm:text-sm leading-relaxed pl-6">{demande.notesCitoyen}</p>
+                <p className="text-xs sm:text-sm leading-relaxed">{demande.notesCitoyen}</p>
               </div>
             )}
 
